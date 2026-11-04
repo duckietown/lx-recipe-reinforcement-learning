@@ -1,1 +1,4 @@
 # LIST YOUR APT PACKAGES HERE
+
+# JPEG decoding of the camera stream (PyTurboJPEG, used by the Duckietown SDK)
+libturbojpeg

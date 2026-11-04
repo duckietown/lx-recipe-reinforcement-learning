@@ -1,15 +1,15 @@
 # syntax=docker/dockerfile:1.4
 # parameters
-ARG EXERCISE_NAME="<LX_NAME_HERE>"
-ARG DESCRIPTION="<DESCRIPTION_HERE>"
-ARG MAINTAINER="<YOUR_FULL_NAME> (<YOUR_EMAIL_ADDRESS>)"
+ARG EXERCISE_NAME="lx-reinforcement-learning"
+ARG DESCRIPTION="Deep reinforcement learning from camera images in the Duckiematrix"
+ARG MAINTAINER="Liam Paull (paulll@iro.umontreal.ca)"
 
 # ==================================================>
 # ==> Do not change the code below this line
 ARG ARCH
 ARG DISTRO=ente
 ARG DOCKER_REGISTRY=docker.io
-ARG BASE_IMAGE=<BASE_IMAGE>
+ARG BASE_IMAGE=dt-commons
 ARG BASE_TAG=${DISTRO}-${ARCH}
 ARG LAUNCHER=default
 
@@ -70,10 +70,8 @@ COPY --from=meat ./assets/. "${REPO_PATH}/assets/"
 # copy the source code (meat)
 COPY --from=meat ./packages/. "${REPO_PATH}/packages/"
 
-# build packages
-RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
-  catkin build \
-    --workspace ${CATKIN_WS_DIR}/
+# make the `packages/` directory importable (there is no ROS workspace to build)
+ENV PYTHONPATH=${REPO_PATH}/packages
 
 # install launcher scripts
 COPY --from=recipe ./launchers/. "${LAUNCH_PATH}/"

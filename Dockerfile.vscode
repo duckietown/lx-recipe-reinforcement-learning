@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.4
 # parameters
-ARG EXERCISE_NAME="<LX_NAME_HERE>"
-ARG DESCRIPTION="VSCode - <DESCRIPTION_HERE>"
-ARG MAINTAINER="<YOUR_FULL_NAME> (<YOUR_EMAIL_ADDRESS>)"
+ARG EXERCISE_NAME="lx-reinforcement-learning"
+ARG DESCRIPTION="VSCode - Deep reinforcement learning from camera images in the Duckiematrix"
+ARG MAINTAINER="Liam Paull (paulll@iro.umontreal.ca)"
 
 # ==================================================>
 # ==> Do not change the code below this line
@@ -42,14 +42,25 @@ WORKDIR "${REPO_PATH}"
 COPY --from=recipe ./dependencies-apt.txt "/tmp/"
 RUN dt-apt-install /tmp/dependencies-apt.txt
 
-# install python3 dependencies
+# install python3 dependencies (the robot-side ones plus what the training notebooks need)
 ARG PIP_INDEX_URL="https://pypi.org/simple"
 ENV PIP_INDEX_URL=${PIP_INDEX_URL}
-COPY --from=recipe ./dependencies-py3.* "/tmp/"
-RUN python3 -m pip install -r /tmp/dependencies-py3.txt
+COPY --from=recipe ./dependencies-py3.txt ./dependencies-vscode.txt /tmp/
+# PyTorch: the PyPI wheels bundle CUDA (several GB), which is only useful on amd64 laptops with an
+# NVIDIA GPU (`dts code editor --gpus all`); arm64 editors (e.g., Apple Silicon) get the CPU build
+ARG TORCH_CPU_INDEX_URL="https://download.pytorch.org/whl/cpu"
+RUN if [ "${TARGETARCH}" = "arm64" ]; then \
+        python3 -m pip install torch --index-url "${TORCH_CPU_INDEX_URL}"; \
+    fi
+RUN python3 -m pip install -r /tmp/dependencies-vscode.txt
 
 # copy the source code (recipe)
+# NOTE: `dts code editor` bind-mounts the LX over ${REPO_PATH}, which hides this copy; the
+#       recipe packages are therefore also installed in a fixed location that is on PYTHONPATH
+#       (the notebooks add the LX's own `packages/` to sys.path themselves).
 COPY --from=recipe ./packages "${REPO_PATH}/packages"
+COPY --from=recipe ./packages /opt/duckietown/lx-recipe/packages
+ENV PYTHONPATH=/opt/duckietown/lx-recipe/packages
 
 # store module metadata
 LABEL org.duckietown.label.module.type="exercise-vscode" \

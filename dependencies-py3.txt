@@ -1,1 +1,19 @@
 # LIST YOUR PYTHON3 PACKAGES HERE
+#
+# These are installed in both the robot image (Dockerfile) and the editor image (Dockerfile.vscode).
+# Training-only packages (PyTorch, ...) are in dependencies-vscode.txt.
+
+# Duckiematrix gym mode: messages 0.1.1 (released), SDK 0.3.0 and gym-duckiematrix 0.1.0.
+# TODO: switch the SDK and gym-duckiematrix to their PyPI releases (duckietown-sdk>=0.3.0,<0.4,
+#       gym-duckiematrix>=0.1.0,<0.2) once they are published; until then they come from the
+#       DTSW-7149 branches.
+duckietown-messages==0.1.1
+duckietown-sdk @ git+https://github.com/duckietown/duckietown-sdk.git@DTSW-7149-Fix-Gym-mode
+gym-duckiematrix @ git+https://github.com/duckietown/gym-duckiematrix.git@DTSW-7149-Fix-Gym-mode
+
+gymnasium>=1.2,<2
+numpy
+Pillow
+
+# runs the exported policy (on the robot and in the evaluation notebook)
+onnxruntime

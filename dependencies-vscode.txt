@@ -1,0 +1,16 @@
+# Python dependencies of the VSCode editor image (Dockerfile.vscode): the robot-side packages
+# plus what the notebooks need to train the agents and export the policy.
+
+-r dependencies-py3.txt
+
+# training (Dockerfile.vscode installs the CPU build first on arm64 editors; amd64 gets the CUDA-enabled PyPI wheel)
+torch
+
+# ONNX export of the trained policy
+onnx
+
+# notebook plots and widgets
+matplotlib
+ipywidgets
+ipympl
+tqdm
