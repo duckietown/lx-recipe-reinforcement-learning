@@ -11,7 +11,7 @@ a real Duckiebot.
 | path | purpose |
 |---|---|
 | `packages/rl_duckiematrix/` | support code the learner does not edit: the gridworld of notebook 01, the Duckiematrix Gymnasium environment and its wrappers (`make_env`), the training loops, ONNX export and the `OnnxPolicy` runner |
-| `packages/agent/` | the deployment agent (`python3 -m agent`, started by `launchers/default.sh`): camera -> learner's `preprocess` -> `OnnxPolicy` -> wheel commands at the policy's decision rate (5 Hz), through the Duckietown SDK. On a real robot the steering becomes the simulator's speed and turn rate, then PWM through the robot's kinematics calibration (`rl_duckiematrix/kinematics.py`) |
+| `packages/agent/` | the deployment agent (`python3 -m agent`, started by `launchers/default.sh`): camera -> learner's `preprocess` -> `OnnxPolicy` -> wheel commands at the policy's decision rate (5 Hz), through the Duckietown SDK. On a real robot the steering becomes the simulator's speed and turn rate, then PWM through the robot's kinematics calibration (`rl_duckiematrix/kinematics.py`). It runs on the robot (`dts code build -R ROBOT`, `dts code workbench -R ROBOT`), not with `--local`, which would put the Wi-Fi and its variable delay between the camera, the policy and the motors |
 | `assets/duckiematrix/map/loop/` | the training map: the standard loop with a 160x120 camera (`cameras.yaml`), which makes the simulator step faster than the default 640x480 |
 | `Dockerfile` | robot image, `dt-commons` base (no ROS: DTPS only); `packages/` on `PYTHONPATH` |
 | `Dockerfile.vscode` | editor image: the robot-side packages plus PyTorch, ONNX and the notebook widgets (`dependencies-vscode.txt`) |
@@ -42,6 +42,10 @@ container is on Docker's bridge network, the engine listens on the laptop.
 from their `DTSW-7149-Fix-Gym-mode` branches (`dependencies-py3.txt`) until they are released; switch to
 the PyPI versions then. PyTorch is only in the editor image (CPU wheels on arm64, CUDA wheels on amd64); the
 robot runs the exported model with ONNX Runtime.
+
+On a Duckiebot the robot image is built on the Jetson itself. On top of `dt-commons` it only installs
+aarch64 wheels (ONNX Runtime 1.31.1, protobuf, gymnasium) and the two pure-Python git packages, so
+nothing is compiled there. The agent was built and run this way on a Jetson Nano Duckiebot in the lab.
 
 ## Tuning notes
 
