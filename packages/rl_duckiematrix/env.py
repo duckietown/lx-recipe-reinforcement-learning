@@ -39,7 +39,7 @@ STEERING_SPEED = 0.6
 STEERING_GAIN = 0.4
 
 # `DuckiematrixDB21JEnv.step` multiplies the wheel commands by this before sending them as PWM; the
-# SDK motors take PWM directly, so the robot agent applies the same factor to drive as in training
+# SDK motors take PWM directly, so the robot agent applies the same factor to recover the training PWMs
 WHEEL_COMMAND_TO_PWM = 0.4
 STEERING_ACTIONS = {
     0: "hard left",

@@ -4,7 +4,9 @@ Started by the launcher through ``dts code workbench -R ROBOT`` (add ``-m`` for 
 The loop is the deployment counterpart of the training environment: camera image -> the learner's
 ``preprocess`` -> frame stack -> greedy action -> wheel commands, at the rate the agent acted at in
 training (the policy's ``decision_interval``: the engine's ``delta_t`` times the action repeat, 0.2 s
-of simulated time with the recipe's defaults, i.e. 5 Hz).
+of simulated time with the recipe's defaults, i.e. 5 Hz). On a real robot the steering becomes the
+speed and turn rate it produced in the simulator, and those become wheel commands through the
+robot's kinematics calibration (gain and trim); see :mod:`rl_duckiematrix.kinematics`.
 
 Environment variables:
     VEHICLE_NAME: the robot (set by ``dts``).
@@ -21,12 +23,14 @@ import os
 import signal
 import socket
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from duckietown.sdk.robots.duckiebot import DB21J
 
-from rl_duckiematrix.env import WHEEL_COMMAND_TO_PWM
+from rl_duckiematrix.env import WHEEL_COMMAND_TO_PWM, steering_to_wheels
 from rl_duckiematrix.export import OnnxPolicy
+from rl_duckiematrix.kinematics import is_virtual_robot, load_kinematics_calibration, steering_to_velocity
 from solution.preprocessing import preprocess
 
 PROJECT_PATH = Path(os.environ.get("DT_REPO_PATH", Path(__file__).resolve().parents[2]))
@@ -44,6 +48,22 @@ def robot_host(name: str) -> str:
             return "127.0.0.1"
     except OSError:
         return f"{name}.local"
+
+
+def wheel_mapping(name: str, host: str, policy: OnnxPolicy) -> Callable[[float], tuple[float, float]]:
+    """Steering -> ``(left, right)`` PWM for this robot."""
+    speed, gain = policy.meta["speed"], policy.meta["gain"]
+    if is_virtual_robot(host):
+        # the virtual robot is the simulator the policy was trained in: send the training PWMs
+        print("[agent] virtual robot: using the training wheel commands")
+        return lambda steering: tuple(float(v) for v in WHEEL_COMMAND_TO_PWM * steering_to_wheels(steering, speed, gain))
+    calibration = load_kinematics_calibration(name, host)
+    print(
+        f"[agent] kinematics calibration from {calibration.source}: gain {calibration.gain:.2f}, "
+        f"trim {calibration.trim:+.3f}, k {calibration.k:.1f}, radius {calibration.radius:.4f}, "
+        f"baseline {calibration.baseline:.3f}"
+    )
+    return lambda steering: calibration.wheels(*steering_to_velocity(steering, speed, gain))
 
 
 def main() -> None:  # noqa: PLR0915
@@ -64,6 +84,7 @@ def main() -> None:  # noqa: PLR0915
     policy = OnnxPolicy(policy_path)
     print(f"[agent] policy {policy_path.name}: {policy.meta}")
     rate = float(os.environ.get("AGENT_RATE_HZ", 1.0 / policy.decision_interval))
+    to_wheels = wheel_mapping(name, host, policy)
     robot = DB21J(name, host=host)
     camera = robot.camera
     motors = robot.motors
@@ -97,11 +118,12 @@ def main() -> None:  # noqa: PLR0915
             # the SDK decodes to BGR; training images are RGB
             frame = preprocess(image[:, :, ::-1])
             action = policy.act(frame)
-            left, right = (WHEEL_COMMAND_TO_PWM * float(v) for v in policy.wheels(action))
+            steering = policy.steering(action)
+            left, right = to_wheels(steering)
             motors.set(left, right)
             steps += 1
             if steps % max(int(rate), 1) == 0:
-                print(f"[agent] step {steps}: steering {policy.steering(action):+.2f} -> PWM ({left:+.2f}, {right:+.2f})")
+                print(f"[agent] step {steps}: steering {steering:+.2f} -> PWM ({left:+.2f}, {right:+.2f})")
             time.sleep(max(0.0, period - (time.monotonic() - tick)))
     finally:
         motors.set(0.0, 0.0)

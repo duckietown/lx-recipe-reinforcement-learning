@@ -6,4 +6,6 @@
 - :mod:`rl_duckiematrix.training`: training loops, evaluation and plotting helpers.
 - :mod:`rl_duckiematrix.export`: ONNX export of a trained policy and the :class:`OnnxPolicy` that
   runs it (in the evaluation notebook and on the robot).
+- :mod:`rl_duckiematrix.kinematics`: the steering -> wheel commands mapping of a real robot, through
+  its kinematics calibration.
 """
