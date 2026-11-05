@@ -113,6 +113,7 @@ class DuckiematrixEnv(DuckiematrixDB21JEnv):
         self._reward_fn = reward_fn or default_reward
         self._delta_t = float(delta_t)
         self._lane_info: dict[str, float] = {}
+        self._map_pose: tuple[np.ndarray, float] | None = None
         kwargs.setdefault("camera_width", CAMERA_WIDTH)
         kwargs.setdefault("camera_height", CAMERA_HEIGHT)
         kwargs.setdefault("entity_name", ENTITY_NAME)
@@ -138,6 +139,7 @@ class DuckiematrixEnv(DuckiematrixDB21JEnv):
             position = position - np.array((half_tile, 0.0, half_tile))
         w, x, y, z = pose["rotation"].values()
         yaw = -quaternion_to_euler_angles((w, x, y, z))[-1]
+        self._map_pose = (position, float(yaw))
         try:
             if _SDK_LANES_MATCH_RENDERER:
                 lane = self._lane_position_calculator.get_lane_pos2(position, yaw)
@@ -187,6 +189,17 @@ class DuckiematrixEnv(DuckiematrixDB21JEnv):
             return None
         return self._observation[:, :, [2, 1, 0]]
 
+    def heading(self) -> float | None:
+        """The robot's heading (rad) after the last step, in the lane calculator's convention."""
+        return None if self._map_pose is None else self._map_pose[1]
+
+    def tile_kind(self) -> str | None:
+        """The kind of map tile (``"straight"``, ``"curve"``, ...) under the robot after the last step."""
+        if self._map_pose is None:
+            return None
+        tile = self._map_interpreter.get_tile(*self._lane_position_calculator.get_grid_coords(self._map_pose[0]))
+        return None if tile is None else tile["kind"]
+
 
 def lane_oracle(lane: dict[str, float], k_distance: float = 8.0, k_angle: float = 2.0) -> float:
     """A hand-written lane follower on the simulator's lane state: steering in [-1, 1] (negative = left).
@@ -201,32 +214,71 @@ def lane_oracle(lane: dict[str, float], k_distance: float = 8.0, k_angle: float 
 
 
 class RandomStart(gym.Wrapper):
-    """Start episodes at random places around the map.
+    """Start episodes at random places around the map, in both lanes.
 
-    The engine can only reset the robot to its spawn pose. After each reset, :func:`lane_oracle`
-    drives it a random number of steps (up to ``max_drive_steps``, about one lap of the loop by
-    default), then a few steps with a random constant steering move it off the lane centre.
-    None of these steps count in the episode. If the robot leaves the road during them, the reset
-    is repeated.
+    The engine can only reset the robot to its spawn pose, in the outer lane of the loop (where
+    every curve turns left). After each reset, with probability ``other_lane_prob`` the robot first
+    moves to the inner lane (tighter curves, all turning right): :func:`lane_oracle` drives it into
+    a straight tile and a half turn to the left takes it across. Then the oracle drives it a random
+    number of steps (up to ``max_drive_steps``, about one lap of the loop by default), and a few
+    steps with a random constant steering move it off the lane centre. None of these steps count in
+    the episode. If the robot leaves the road during them, the reset is repeated.
 
     When the previous episode ended without leaving the road (time limit), the next one simply
     continues from where the robot is: no engine reset, no extra steps.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         env: gym.Env,
         max_drive_steps: int = 330,
         max_perturb_steps: int = 10,
         speed: float = STEERING_SPEED,
+        other_lane_prob: float = 0.5,
     ) -> None:
         super().__init__(env)
         self._max_drive_steps = max_drive_steps
         self._max_perturb_steps = max_perturb_steps
         self._speed = speed
+        self._other_lane_prob = other_lane_prob
         self._rng = np.random.default_rng()
         self._needs_reset = True
         self._last: tuple[np.ndarray, dict[str, Any]] | None = None
+
+    def _drive(self, steering: float):
+        return self.env.step(steering_to_wheels(steering, speed=self._speed))
+
+    def _to_other_lane(self, max_steps: int = 200):
+        """Follow the lane into a straight tile, then turn half a circle to the left into the other lane.
+
+        Returns ``(observation, info, ok)``.
+        """
+        base = base_env(self.env)
+        lane: dict[str, float] = {}
+        straight_steps = 0
+        for _ in range(max_steps):
+            observation, _, terminated, _, info = self._drive(lane_oracle(lane))
+            lane = info.get("lane", {})
+            if terminated:
+                return observation, info, False
+            straight_steps = straight_steps + 1 if base.tile_kind() == "straight" else 0
+            # a few steps past the tile entrance and settled on the lane centre
+            if straight_steps >= 8 and abs(lane.get("angle", 1.0)) < 0.1 and abs(lane.get("distance", 1.0)) < 0.02:
+                break
+        else:
+            return observation, info, False
+        turned, previous = 0.0, base.heading()
+        for _ in range(max_steps):
+            observation, _, terminated, _, info = self._drive(-1.0)
+            if terminated:
+                return observation, info, False
+            heading = base.heading()
+            turned += abs(math.remainder(heading - previous, 2 * math.pi))
+            previous = heading
+            if turned >= math.pi:
+                lane = info.get("lane", {})
+                return observation, info, bool(lane.get("on_road")) and abs(lane.get("distance", 1.0)) < 0.05
+        return observation, info, False
 
     def step(self, action):
         observation, reward, terminated, truncated, info = self.env.step(action)
@@ -244,10 +296,13 @@ class RandomStart(gym.Wrapper):
             observation, info = self.env.reset(seed=seed, options=options)
             terminated = False
             lane: dict[str, float] = {}
+            if self._rng.random() < self._other_lane_prob:
+                observation, info, ok = self._to_other_lane()
+                if not ok:
+                    continue
+                lane = info.get("lane", {})
             for _ in range(int(self._rng.integers(0, self._max_drive_steps + 1))):
-                observation, _, terminated, _, info = self.env.step(
-                    steering_to_wheels(lane_oracle(lane), speed=self._speed),
-                )
+                observation, _, terminated, _, info = self._drive(lane_oracle(lane))
                 lane = info.get("lane", {})
                 if terminated:
                     break
@@ -255,15 +310,44 @@ class RandomStart(gym.Wrapper):
             for _ in range(int(self._rng.integers(0, self._max_perturb_steps + 1))):
                 if terminated:
                     break
-                observation, _, terminated, _, info = self.env.step(
-                    steering_to_wheels(steering, speed=self._speed),
-                )
+                observation, _, terminated, _, info = self._drive(steering)
             if not terminated:
                 self._needs_reset = True
                 self._last = (observation, info)
                 return observation, info
         message = "Could not find an on-road start pose after 20 resets."
         raise RuntimeError(message)
+
+
+class ActionDelay(gym.Wrapper):
+    """Apply each wheel command a few simulator steps late: 0 to ``max_delay`` steps, drawn per episode.
+
+    In the simulator the wheels obey a command in the very step the agent sends it. On a robot the
+    camera image is already old when the agent sees it, and the command takes time to reach the
+    motors (camera, network, decoding, inference). Training with a random delay makes the policy
+    cope with that. The delay is in simulator steps (``delta_t``, 0.1 s with the recipe's settings).
+    """
+
+    def __init__(self, env: gym.Env, max_delay: int = 1) -> None:
+        super().__init__(env)
+        self._max_delay = max_delay
+        self._rng = np.random.default_rng()
+        self._delay = 0
+        self._pending: deque[np.ndarray] = deque()
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+        self._delay = int(self._rng.integers(0, self._max_delay + 1))
+        self._pending.clear()
+        return self.env.reset(seed=seed, options=options)
+
+    def step(self, action):
+        self._pending.append(np.asarray(action))
+        while len(self._pending) > self._delay + 1:
+            self._pending.popleft()
+        # until `delay` commands are queued (start of an episode), the oldest one is the current one
+        return self.env.step(self._pending[0])
 
 
 class ActionRepeat(gym.Wrapper):
@@ -383,6 +467,7 @@ def make_env(  # noqa: PLR0913
     out_of_road_penalty: float = -10.0,
     delta_t: float = DELTA_T,
     reward_fn: RewardFn | None = None,
+    action_delay: int = 1,
 ) -> gym.Env:
     """Build the wrapped Duckiematrix environment used by the notebooks.
 
@@ -392,7 +477,7 @@ def make_env(  # noqa: PLR0913
         max_episode_steps: agent steps before the episode is truncated.
         action_repeat: simulator steps per agent step.
         frame_stack: preprocessed frames stacked into one observation.
-        random_start: randomize the start pose after each reset.
+        random_start: randomize the start pose (and lane) after each reset.
         actions: ``"discrete"`` (five steering actions, for DQN), ``"steering"`` (one continuous
             steering value in [-1, 1], for SAC) or ``"wheels"`` (the two raw wheel commands).
         render_mode: forwarded to the base environment (``"human"`` opens a window; not useful in
@@ -401,6 +486,8 @@ def make_env(  # noqa: PLR0913
         out_of_road_penalty: reward when the robot leaves the lane (terminates the episode).
         delta_t: simulated seconds per engine step (must match the engine's ``--delta-t``).
         reward_fn: per-step reward from ``info["lane"]`` (:func:`default_reward` by default).
+        action_delay: largest delay of the wheel commands, in simulator steps (:class:`ActionDelay`;
+            0 turns it off).
 
     """
     if actions not in ACTION_MODES:
@@ -410,6 +497,8 @@ def make_env(  # noqa: PLR0913
         engine_host=engine_host, render_mode=render_mode, shm_path=shm_path,
         out_of_road_penalty=out_of_road_penalty, delta_t=delta_t, reward_fn=reward_fn,
     )
+    if action_delay > 0:
+        env = ActionDelay(env, action_delay)
     if random_start:
         env = RandomStart(env)
     if action_repeat > 1:
