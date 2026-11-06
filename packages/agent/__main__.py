@@ -118,8 +118,9 @@ def main() -> None:  # noqa: PLR0915
                 print("[agent] no camera image for 2 s, stopping the wheels")
                 motors.set(0.0, 0.0)
                 continue
-            # BGR, as in training: the gym environment decodes its camera images with the same SDK decoder
-            frame = preprocess(image)
+            # The robot's camera stream decodes to BGR, but the training environment's frames are RGB (the
+            # engine sends it differently encoded JPEGs; same decoder, opposite channel order), so swap.
+            frame = preprocess(image[:, :, ::-1])
             action = policy.act(frame)
             steering = policy.steering(action)
             left, right = to_wheels(steering)
