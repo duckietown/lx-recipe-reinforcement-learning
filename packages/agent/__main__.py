@@ -33,7 +33,10 @@ from rl_duckiematrix.export import OnnxPolicy
 from rl_duckiematrix.kinematics import is_virtual_robot, load_kinematics_calibration, steering_to_velocity
 from solution.preprocessing import preprocess
 
-PROJECT_PATH = Path(os.environ.get("DT_REPO_PATH", Path(__file__).resolve().parents[2]))
+# The image's root, from this file's location (<root>/packages/agent/__main__.py). Not DT_REPO_PATH: the
+# base image's environment.d/compatibility.sh resets it to dt-commons' path when the launcher sources
+# /environment.sh.
+PROJECT_PATH = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = PROJECT_PATH / "assets" / "models" / "policy.onnx"
 ROBOT_DTPS_PORT = 11911
 
