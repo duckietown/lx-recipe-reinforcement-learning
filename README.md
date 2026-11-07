@@ -98,5 +98,14 @@ nothing is compiled there. The agent was built and run this way on a Jetson Nano
   The policy trained in the outer lane only stays on the road in the inner lane too, but 3.9-4.7 cm off
   centre there (0.8 cm in the outer lane): the inner lane's right curves trade some outer-lane precision
   for a better worst case. Trained policies drive slightly better with the 0.1 s delay than without it.
+- Smoothness: trained in both lanes with the delay, SAC learned bang-bang steering (steering change
+  0.69 per decision in the outer lane, 1.11 in the inner lane, left/right swaps on 40-66% of decisions;
+  it oscillated on the virtual robot as on the real one). `train_sac` therefore adds a smoothness
+  penalty to the actor loss (`smoothness_loss`, after CAPS: the action should change little between
+  consecutive images and for images shifted by a few pixels; `SACConfig.temporal_smoothness` 1.0,
+  `spatial_smoothness` 0.5). With it, in the outer lane: 0.04 per decision, no swaps, 0.5 cm from the
+  centre, smooth up to 0.2 s of delay. In the inner lane it still oscillated (0.55, off the road in 3 of
+  8 episodes): after a time-limit truncation `RandomStart` continues where the robot is, so long
+  episodes kept training in one lane. Starting every episode at a new pose (DTSW-8541) fixes that.
 - Known SDK issue: `DB21J(...).delta_time` requests `/delta_time/` without its `map/` prefix (404), so
   the time step cannot be read from the engine yet.

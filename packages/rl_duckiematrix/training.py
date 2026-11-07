@@ -269,8 +269,38 @@ class SACConfig:
     train_every: int = 2
     buffer_size: int = 30_000
     augment_pad: int = 2
+    # smoothness terms added to the actor loss (see smoothness_loss); 0 turns a term off
+    temporal_smoothness: float = 1.0
+    spatial_smoothness: float = 0.5
     checkpoint_every: int = 5_000
     seed: int = 0
+
+
+def smoothness_loss(critic, actor, batch, *, temporal: float, spatial: float, random_shift, pad: int):
+    """Penalty on jumpy steering, added to the actor loss.
+
+    Without it, SAC often learns bang-bang steering: near the best action the Q-values hardly differ,
+    so the policy's choice flips between neighbouring images. Following CAPS (Mysore et al., 2021),
+    the policy's action (the squashed mean) is pulled towards
+
+    - the action at the next decision (``temporal``): consecutive images, similar steering;
+    - the action for the same images shifted by a few pixels (``spatial``): small image changes,
+      small steering changes.
+
+    Only the actor is trained by this term (the encoder's features are detached, as in the actor loss).
+    """
+    import torch  # noqa: PLC0415
+
+    action = actor.deterministic(critic.encoder(batch.observations).detach())
+    loss = torch.zeros((), dtype=action.dtype)
+    if temporal:
+        next_action = actor.deterministic(critic.encoder(batch.next_observations).detach())
+        not_done = (1.0 - batch.dones).unsqueeze(1)
+        loss = loss + temporal * ((action - next_action).pow(2) * not_done).mean()
+    if spatial:
+        shifted = actor.deterministic(critic.encoder(random_shift(batch.observations, pad)).detach())
+        loss = loss + spatial * (action - shifted).pow(2).mean()
+    return loss
 
 
 @dataclass
@@ -356,7 +386,7 @@ def train_sac(  # noqa: PLR0913, PLR0915
             step += 1
 
             if len(buffer) >= config.learning_starts and step % config.train_every == 0:
-                batch = buffer.sample(config.batch_size)
+                raw_batch = batch = buffer.sample(config.batch_size)
                 if config.augment_pad:
                     batch = batch._replace(
                         observations=sac.random_shift(batch.observations, config.augment_pad),
@@ -368,6 +398,12 @@ def train_sac(  # noqa: PLR0913, PLR0915
                 loss.backward()
                 critic_optimizer.step()
                 a_loss, log_prob = sac.actor_loss(critic, actor, batch, alpha)
+                if config.temporal_smoothness or config.spatial_smoothness:
+                    a_loss = a_loss + smoothness_loss(
+                        critic, actor, raw_batch,
+                        temporal=config.temporal_smoothness, spatial=config.spatial_smoothness,
+                        random_shift=sac.random_shift, pad=max(config.augment_pad, 2),
+                    )
                 actor_optimizer.zero_grad()
                 a_loss.backward()
                 actor_optimizer.step()
