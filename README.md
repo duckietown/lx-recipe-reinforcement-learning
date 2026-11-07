@@ -68,14 +68,14 @@ nothing is compiled there. The agent was built and run this way on a Jetson Nano
 - Rates (native macOS renderer, 160x120 camera): ~18 engine steps/s of wall-clock time, i.e. the
   simulation runs ~1.8x faster than real time; ~7 decisions/s during DQN training (gradient steps and
   the random starts included).
-- The engine only resets the robot to its spawn pose (half a tile before a curve, in the outer lane,
-  where all four curves turn left; the inner lane's curves turn right with a 0.18 m radius instead of
-  0.41 m). After each reset `RandomStart` moves the robot to the inner lane on half of the episodes
-  (`lane_oracle` drives into a straight tile, then full-left steering until the heading has turned
-  180°), lets `lane_oracle` drive a random number of steps (up to 330, about one lap) and then up to
-  10 steps of random constant steering; after a time-limit truncation the next episode continues
-  where the robot is, so that episodes start all around the loop rather than always before the same
-  curve. To be replaced by a reset-to-pose in the gym protocol once the DTSW-7149 PRs are merged.
+- Start poses: each reset puts the robot at a random pose on the road (`RandomStart`, through
+  `env.reset(options={"pose": ...})`, DTSW-8541): a random tile, either lane, a random point along the
+  lane centre, then up to 4 cm sideways and 23° off the lane direction (`sample_lane_pose`). Every
+  episode starts at a new pose, so training sees both lanes (outer lane: all four curves turn left,
+  radius 0.41 m; inner lane: right curves, 0.18 m) and every tile equally. A reset takes ~0.05 s; the
+  previous `RandomStart` drove up to 330 oracle steps plus a U-turn after every reset (the engine could
+  only reset to the spawn pose), which made early training ~4x slower, and after a time-limit truncation
+  it continued where the robot was, so long episodes kept training in one lane.
 - `ActionDelay` applies the wheel commands 0 or 1 simulator steps (0 or 0.1 s) late, drawn per
   episode (`make_env(action_delay=...)`), because the real robot's loop (camera, network, decoding)
   is slower than the simulator's, which has no delay.
@@ -107,5 +107,10 @@ nothing is compiled there. The agent was built and run this way on a Jetson Nano
   centre, smooth up to 0.2 s of delay. In the inner lane it still oscillated (0.55, off the road in 3 of
   8 episodes): after a time-limit truncation `RandomStart` continues where the robot is, so long
   episodes kept training in one lane. Starting every episode at a new pose (DTSW-8541) fixes that.
+- Pose starts + smoothness (the current defaults), SAC (`SACConfig()`, 15k decisions, 49 min): every
+  episode reaches the limit from about 2.4k decisions. Per decision, 2 x 300 decisions per case, delays
+  0 to 0.3 s (training draws 0 or 0.1 s): steering change 0.04-0.07 in the outer lane and 0.07-0.14 in
+  the inner lane, no left/right swaps, never off the road; 0.8-1.2 cm from the lane centre in the outer
+  lane and 0.6-0.9 cm in the inner lane (oracle: 1.9 and 2.5 cm, steering change 0.02).
 - Known SDK issue: `DB21J(...).delta_time` requests `/delta_time/` without its `map/` prefix (404), so
   the time step cannot be read from the engine yet.
