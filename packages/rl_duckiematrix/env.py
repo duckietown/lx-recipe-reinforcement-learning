@@ -6,6 +6,9 @@ in, wheel commands out, lane-following reward) pointed at the engine found by
 
 ``DuckiematrixEnv -> RandomStart -> ActionRepeat -> Preprocess -> FrameStack -> DiscreteSteering
 (or ContinuousSteering) -> TimeLimit -> RecordEpisodeStatistics``
+
+``make_env(..., mode="realtime")`` builds the same stack on
+:class:`rl_duckiematrix.realtime.RealtimeDuckiematrixEnv` (engine in real-time mode, notebook 06).
 """
 
 from __future__ import annotations
@@ -446,7 +449,7 @@ class ContinuousSteering(gym.ActionWrapper):
 ACTION_MODES = ("discrete", "steering", "wheels")
 
 
-def make_env(  # noqa: PLR0913
+def make_env(  # noqa: C901, PLR0913
     preprocess: PreprocessFn,
     *,
     engine_host: str | None = None,
@@ -460,7 +463,8 @@ def make_env(  # noqa: PLR0913
     out_of_road_penalty: float = -10.0,
     delta_t: float = DELTA_T,
     reward_fn: RewardFn | None = None,
-    action_delay: int = 1,
+    action_delay: int | None = None,
+    mode: str = "gym",
 ) -> gym.Env:
     """Build the wrapped Duckiematrix environment used by the notebooks.
 
@@ -480,18 +484,38 @@ def make_env(  # noqa: PLR0913
         delta_t: simulated seconds per engine step (must match the engine's ``--delta-t``).
         reward_fn: per-step reward from ``info["lane"]`` (:func:`default_reward` by default).
         action_delay: largest delay of the wheel commands, in simulator steps (:class:`ActionDelay`;
-            0 turns it off).
+            0 turns it off). Default: 1 in gym mode, 0 in real time (where the delay is real).
+        mode: ``"gym"`` (the engine waits for the agent; start it with ``--gym``) or ``"realtime"``
+            (the engine runs on the wall clock: :class:`rl_duckiematrix.realtime.RealtimeDuckiematrixEnv`,
+            notebook 06; ``delta_t`` is then the wall-clock tick, and ``render_mode`` and ``shm_path``
+            do not apply).
 
     """
     if actions not in ACTION_MODES:
         message = f"actions must be one of {ACTION_MODES}, got {actions!r}."
         raise ValueError(message)
-    env: gym.Env = DuckiematrixEnv(
-        engine_host=engine_host, render_mode=render_mode, shm_path=shm_path,
-        out_of_road_penalty=out_of_road_penalty, delta_t=delta_t, reward_fn=reward_fn,
-    )
-    if action_delay > 0:
-        env = ActionDelay(env, action_delay)
+    env: gym.Env
+    if mode == "gym":
+        env = DuckiematrixEnv(
+            engine_host=engine_host, render_mode=render_mode, shm_path=shm_path,
+            out_of_road_penalty=out_of_road_penalty, delta_t=delta_t, reward_fn=reward_fn,
+        )
+        delay = 1 if action_delay is None else action_delay
+    elif mode == "realtime":
+        if render_mode is not None or shm_path is not None:
+            message = "render_mode and shm_path are gym-mode options."
+            raise ValueError(message)
+        from rl_duckiematrix.realtime import RealtimeDuckiematrixEnv  # noqa: PLC0415
+
+        env = RealtimeDuckiematrixEnv(
+            engine_host=engine_host, tick=delta_t, reward_fn=reward_fn, out_of_road_penalty=out_of_road_penalty,
+        )
+        delay = 0 if action_delay is None else action_delay
+    else:
+        message = f"mode must be 'gym' or 'realtime', got {mode!r}."
+        raise ValueError(message)
+    if delay > 0:
+        env = ActionDelay(env, delay)
     if random_start:
         env = RandomStart(env)
     if action_repeat > 1:

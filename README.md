@@ -10,7 +10,7 @@ a real Duckiebot.
 
 | path | purpose |
 |---|---|
-| `packages/rl_duckiematrix/` | support code the learner does not edit: the gridworld of notebook 01, the Duckiematrix Gymnasium environment and its wrappers (`make_env`), the training loops, ONNX export and the `OnnxPolicy` runner |
+| `packages/rl_duckiematrix/` | support code the learner does not edit: the gridworld of notebook 01, the Duckiematrix Gymnasium environment and its wrappers (`make_env`; `realtime.py`: the same environment on a real-time engine, notebook 06), the training loops, ONNX export and the `OnnxPolicy` runner |
 | `packages/agent/` | the deployment agent (`python3 -m agent`, started by `launchers/default.sh`): camera -> learner's `preprocess` -> `OnnxPolicy` -> wheel commands at the policy's decision rate (5 Hz), through the Duckietown SDK. On a real robot the steering becomes the simulator's speed and turn rate, then PWM through the robot's kinematics calibration (`rl_duckiematrix/kinematics.py`). It runs on the robot (`dts code build -R ROBOT`, `dts code workbench -R ROBOT`), not with `--local`, which would put the Wi-Fi and its variable delay between the camera, the policy and the motors |
 | `assets/duckiematrix/map/loop/` | the training map: the standard loop with a 160x120 camera (`cameras.yaml`), which makes the simulator step faster than the default 640x480 |
 | `Dockerfile` | robot image, `dt-commons` base (no ROS: DTPS only); `packages/` on `PYTHONPATH` |
@@ -31,6 +31,19 @@ it must match `rl_duckiematrix.env.DELTA_T`, which the environment uses to compu
 
 The engine accepts one client at a time: a notebook must `close()` its environment before
 another one connects. `dts code workbench -m` uses the normal real-time mode, as on a real robot.
+
+## Real-time mode
+
+Notebook 06 runs the same environment on the engine in its normal real-time mode (`dts code start_matrix`,
+no `--gym`): `make_env(..., mode="realtime")` builds the usual wrapper stack on
+`rl_duckiematrix.realtime.RealtimeDuckiematrixEnv`, which sends the wheel commands over DTPS like the robot
+agent, steps on a 0.1 s wall-clock tick and reads the newest image and pose; `env.unwrapped.timing` and
+`timing_summary` record how late the agent came back. Random start poses use the engine's real-time
+reset-to-pose (`state/reset_pose`, DTSW-8541); the engine's plain reset and the renderer's R key go back
+to the spawn pose. No action delay is simulated by default in real time (`action_delay=None` means 1 in gym
+mode, 0 in real time). Measured on a laptop VM: the gym-trained SAC policy drives as well in real time
+(steering change 0.04 / 0.10 per decision, outer / inner lane); training in real time works, but each SAC
+update (~0.18 s) is longer than a tick, so once updates start one step in four arrives ~0.18 s late.
 
 The Python environment inside the editor finds the engine through `rl_duckiematrix.engine`
 (`DUCKIEMATRIX_HOST`, then `127.0.0.1`, `host.docker.internal` and the default gateway): the editor
