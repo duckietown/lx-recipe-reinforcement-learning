@@ -38,9 +38,8 @@ container is on Docker's bridge network, the engine listens on the laptop.
 
 ## Dependencies
 
-`duckietown-messages` 0.1.1 comes from PyPI. `gym-duckiematrix` and `duckietown-sdk` 0.3 are installed
-from their `DTSW-7149-Fix-Gym-mode` branches (`dependencies-py3.txt`) until they are released; switch to
-the PyPI versions then. PyTorch is only in the editor image (CPU wheels on arm64, CUDA wheels on amd64); the
+`duckietown-messages` (0.1.1+), `duckietown-sdk` (0.3.2+, the first release whose lane geometry matches
+the rendered road) and `gym-duckiematrix` (0.1+) come from PyPI (`dependencies-py3.txt`). PyTorch is only in the editor image (CPU wheels on arm64, CUDA wheels on amd64); the
 robot runs the exported model with ONNX Runtime.
 
 On a Duckiebot the robot image is built on the Jetson itself. On top of `dt-commons` it only installs
