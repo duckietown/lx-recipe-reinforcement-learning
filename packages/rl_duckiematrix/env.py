@@ -15,18 +15,20 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import gymnasium as gym
 import numpy as np
 from duckietown.sdk.middleware.dtps.components import DTPSWorldInput, DTPSWorldOutput
 from duckietown.sdk.robots.duckiebot import DB21J
-from duckietown.sdk.utils.lane_position import MapInterpreter
 from gym_duckiematrix.db21j_env import DuckiematrixDB21JEnv
 from gymnasium import spaces
 from gymnasium.wrappers import RecordEpisodeStatistics, TimeLimit
 
 from rl_duckiematrix.engine import ENGINE_PORT, resolve_engine_host
+
+if TYPE_CHECKING:
+    from duckietown.sdk.utils.lane_position import MapInterpreter
 
 # the recipe's map (assets/duckiematrix/map/loop/cameras.yaml) renders a small camera image
 CAMERA_WIDTH = 160
@@ -53,9 +55,6 @@ STEERING_ACTIONS = {
 }
 STEERING_VALUES = (-1.0, -0.5, 0.0, 0.5, 1.0)
 
-# duckietown-sdk until the DTSW-7149 lane geometry fix placed the lanes half a tile off the rendered
-# road and ran them the wrong way; the fixed SDK has `MapInterpreter.tile_center`
-_SDK_LANES_MATCH_RENDERER = hasattr(MapInterpreter, "tile_center")
 
 PreprocessFn = Callable[[np.ndarray], np.ndarray]
 RewardFn = Callable[[dict[str, float]], float]
@@ -135,21 +134,11 @@ class DuckiematrixEnv(DuckiematrixDB21JEnv):
         x, y, z = previous_pose["position"].values()
         previous_position = np.array((x, z, y))
         speed = float(np.linalg.norm(position - previous_position) / self._delta_t)
-        if not _SDK_LANES_MATCH_RENDERER:
-            # Older SDKs place tile (i, j)'s centre where the renderer puts its corner: shift by
-            # half a tile into the SDK's frame (fixed together with the lane directions below).
-            half_tile = 0.5 * self._lane_position_calculator.road_tile_size
-            position = position - np.array((half_tile, 0.0, half_tile))
         w, x, y, z = pose["rotation"].values()
         yaw = -quaternion_to_euler_angles((w, x, y, z))[-1]
         self._map_pose = (position, float(yaw))
         try:
-            if _SDK_LANES_MATCH_RENDERER:
-                lane = self._lane_position_calculator.get_lane_pos2(position, yaw)
-            else:
-                # Older SDKs run every lane the wrong way (left-hand traffic): asking about the
-                # reversed heading selects the lane the robot is actually in.
-                lane = self._lane_position_calculator.get_lane_pos2(position, yaw + math.pi)
+            lane = self._lane_position_calculator.get_lane_pos2(position, yaw)
         except NotInLane:
             self._lane_info = {"on_road": 0.0, "speed": speed}
             return float(self._out_of_road_penalty), True
@@ -160,7 +149,7 @@ class DuckiematrixEnv(DuckiematrixDB21JEnv):
             "speed_along_lane": speed * float(lane.dot_dir),
             # the SDK reports both to the right as positive; here left is positive
             "distance": -float(lane.dist),
-            "angle": -float(lane.angle_rad) if _SDK_LANES_MATCH_RENDERER else float(lane.angle_rad),
+            "angle": -float(lane.angle_rad),
         }
         return float(self._reward_fn(self._lane_info)), False
 
