@@ -3,3 +3,6 @@
 matrix:
   map: "loop"
   vehicle: "map_0/vehicle_0"
+  # simulated seconds per engine step in gym mode (`dts code start_matrix --gym`); it must match
+  # `rl_duckiematrix.env.DELTA_T`
+  delta_t: 0.1
