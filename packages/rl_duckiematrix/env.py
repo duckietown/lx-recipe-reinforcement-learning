@@ -6,24 +6,29 @@ in, wheel commands out, lane-following reward) pointed at the engine found by
 
 ``DuckiematrixEnv -> RandomStart -> ActionRepeat -> Preprocess -> FrameStack -> DiscreteSteering
 (or ContinuousSteering) -> TimeLimit -> RecordEpisodeStatistics``
+
+``make_env(..., mode="realtime")`` builds the same stack on
+:class:`rl_duckiematrix.realtime.RealtimeDuckiematrixEnv` (engine in real-time mode, notebook 06).
 """
 
 from __future__ import annotations
 
 import math
 from collections import deque
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import gymnasium as gym
 import numpy as np
 from duckietown.sdk.middleware.dtps.components import DTPSWorldInput, DTPSWorldOutput
 from duckietown.sdk.robots.duckiebot import DB21J
-from duckietown.sdk.utils.lane_position import MapInterpreter
 from gym_duckiematrix.db21j_env import DuckiematrixDB21JEnv
 from gymnasium import spaces
 from gymnasium.wrappers import RecordEpisodeStatistics, TimeLimit
 
 from rl_duckiematrix.engine import ENGINE_PORT, resolve_engine_host
+
+if TYPE_CHECKING:
+    from duckietown.sdk.utils.lane_position import MapInterpreter
 
 # the recipe's map (assets/duckiematrix/map/loop/cameras.yaml) renders a small camera image
 CAMERA_WIDTH = 160
@@ -50,9 +55,6 @@ STEERING_ACTIONS = {
 }
 STEERING_VALUES = (-1.0, -0.5, 0.0, 0.5, 1.0)
 
-# duckietown-sdk until the DTSW-7149 lane geometry fix placed the lanes half a tile off the rendered
-# road and ran them the wrong way; the fixed SDK has `MapInterpreter.tile_center`
-_SDK_LANES_MATCH_RENDERER = hasattr(MapInterpreter, "tile_center")
 
 PreprocessFn = Callable[[np.ndarray], np.ndarray]
 RewardFn = Callable[[dict[str, float]], float]
@@ -132,21 +134,11 @@ class DuckiematrixEnv(DuckiematrixDB21JEnv):
         x, y, z = previous_pose["position"].values()
         previous_position = np.array((x, z, y))
         speed = float(np.linalg.norm(position - previous_position) / self._delta_t)
-        if not _SDK_LANES_MATCH_RENDERER:
-            # Older SDKs place tile (i, j)'s centre where the renderer puts its corner: shift by
-            # half a tile into the SDK's frame (fixed together with the lane directions below).
-            half_tile = 0.5 * self._lane_position_calculator.road_tile_size
-            position = position - np.array((half_tile, 0.0, half_tile))
         w, x, y, z = pose["rotation"].values()
         yaw = -quaternion_to_euler_angles((w, x, y, z))[-1]
         self._map_pose = (position, float(yaw))
         try:
-            if _SDK_LANES_MATCH_RENDERER:
-                lane = self._lane_position_calculator.get_lane_pos2(position, yaw)
-            else:
-                # Older SDKs run every lane the wrong way (left-hand traffic): asking about the
-                # reversed heading selects the lane the robot is actually in.
-                lane = self._lane_position_calculator.get_lane_pos2(position, yaw + math.pi)
+            lane = self._lane_position_calculator.get_lane_pos2(position, yaw)
         except NotInLane:
             self._lane_info = {"on_road": 0.0, "speed": speed}
             return float(self._out_of_road_penalty), True
@@ -157,12 +149,20 @@ class DuckiematrixEnv(DuckiematrixDB21JEnv):
             "speed_along_lane": speed * float(lane.dot_dir),
             # the SDK reports both to the right as positive; here left is positive
             "distance": -float(lane.dist),
-            "angle": -float(lane.angle_rad) if _SDK_LANES_MATCH_RENDERER else float(lane.angle_rad),
+            "angle": -float(lane.angle_rad),
         }
         return float(self._reward_fn(self._lane_info)), False
 
     def _get_info(self) -> dict[str, Any]:  # type: ignore[override]
         return {"lane": dict(self._lane_info)}
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        observation, info = super().reset(seed=seed, options=options)
+        if self._pose is not None:
+            # lane information for the new pose (not the previous episode's last step); no motion yet
+            self._get_reward(self._pose, self._pose)
+            info = self._get_info()
+        return observation, info
 
     # the parent builds its DTPS components for 127.0.0.1; rebuild them for the resolved host
     def _make_world_input(self, shm_base: str | None):  # type: ignore[override]
@@ -213,72 +213,64 @@ def lane_oracle(lane: dict[str, float], k_distance: float = 8.0, k_angle: float 
     return float(np.clip(k_distance * lane["distance"] + k_angle * lane["angle"], -1.0, 1.0))
 
 
+def sample_lane_pose(
+    map_interpreter: MapInterpreter,
+    rng: np.random.Generator,
+    *,
+    max_offset: float = 0.04,
+    max_angle: float = 0.4,
+) -> dict[str, float]:
+    """A random pose near the centre of a random lane, in the engine's frame (``x``, ``y``, ``yaw``).
+
+    A drivable tile, one of its lanes (both driving directions, so both lanes of a two-lane road)
+    and a point along that lane's centre line are drawn uniformly; the robot is then moved up to
+    ``max_offset`` (m) sideways and turned up to ``max_angle`` (rad) away from the lane direction.
+    The result is what ``env.reset(options={"pose": ...})`` takes.
+    """
+    from duckietown.sdk.utils.lane_position import bezier_point, bezier_tangent  # noqa: PLC0415
+
+    tile = map_interpreter.drivable_tiles[int(rng.integers(len(map_interpreter.drivable_tiles)))]
+    curve = tile["curves"][int(rng.integers(len(tile["curves"])))]
+    parameter = float(rng.uniform(0.0, 1.0))
+    # the lane geometry's frame is (x, up, y), with headings measured the other way round
+    point = np.asarray(bezier_point(curve, parameter), dtype=float)
+    tangent = np.asarray(bezier_tangent(curve, parameter), dtype=float)
+    tangent /= np.linalg.norm(tangent)
+    right = np.cross(np.array([0.0, 1.0, 0.0]), tangent)
+    point = point + float(rng.uniform(-max_offset, max_offset)) * right
+    lane_heading = math.atan2(-tangent[2], tangent[0]) + float(rng.uniform(-max_angle, max_angle))
+    return {"x": float(point[0]), "y": float(point[2]), "yaw": float(math.remainder(-lane_heading, 2 * math.pi))}
+
+
 class RandomStart(gym.Wrapper):
     """Start episodes at random places around the map, in both lanes.
 
-    The engine can only reset the robot to its spawn pose, in the outer lane of the loop (where
-    every curve turns left). After each reset, with probability ``other_lane_prob`` the robot first
-    moves to the inner lane (tighter curves, all turning right): :func:`lane_oracle` drives it into
-    a straight tile and a half turn to the left takes it across. Then the oracle drives it a random
-    number of steps (up to ``max_drive_steps``, about one lap of the loop by default), and a few
-    steps with a random constant steering move it off the lane centre. None of these steps count in
-    the episode. If the robot leaves the road during them, the reset is repeated.
+    Each reset puts the robot at a pose drawn by :func:`sample_lane_pose`: anywhere on the road, in
+    either lane, up to ``max_offset`` (m) off the lane centre and ``max_angle`` (rad) off the lane
+    direction. Without this the engine would always reset the robot to its spawn pose, in the outer
+    lane of the loop, where every curve turns left. If a drawn pose is not on the road, another one
+    is drawn.
 
-    When the previous episode ended without leaving the road (time limit), the next one simply
-    continues from where the robot is: no engine reset, no extra steps.
+    Every episode starts at a new pose, so training sees both lanes and all tiles in equal measure.
+    With ``continue_after_time_limit``, an episode that ended without leaving the road (time limit)
+    is instead followed by one that continues from where the robot is.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         env: gym.Env,
-        max_drive_steps: int = 330,
-        max_perturb_steps: int = 10,
-        speed: float = STEERING_SPEED,
-        other_lane_prob: float = 0.5,
+        max_offset: float = 0.04,
+        max_angle: float = 0.4,
+        *,
+        continue_after_time_limit: bool = False,
     ) -> None:
         super().__init__(env)
-        self._max_drive_steps = max_drive_steps
-        self._max_perturb_steps = max_perturb_steps
-        self._speed = speed
-        self._other_lane_prob = other_lane_prob
+        self._max_offset = max_offset
+        self._max_angle = max_angle
+        self._continue = continue_after_time_limit
         self._rng = np.random.default_rng()
         self._needs_reset = True
         self._last: tuple[np.ndarray, dict[str, Any]] | None = None
-
-    def _drive(self, steering: float):
-        return self.env.step(steering_to_wheels(steering, speed=self._speed))
-
-    def _to_other_lane(self, max_steps: int = 200):
-        """Follow the lane into a straight tile, then turn half a circle to the left into the other lane.
-
-        Returns ``(observation, info, ok)``.
-        """
-        base = base_env(self.env)
-        lane: dict[str, float] = {}
-        straight_steps = 0
-        for _ in range(max_steps):
-            observation, _, terminated, _, info = self._drive(lane_oracle(lane))
-            lane = info.get("lane", {})
-            if terminated:
-                return observation, info, False
-            straight_steps = straight_steps + 1 if base.tile_kind() == "straight" else 0
-            # a few steps past the tile entrance and settled on the lane centre
-            if straight_steps >= 8 and abs(lane.get("angle", 1.0)) < 0.1 and abs(lane.get("distance", 1.0)) < 0.02:
-                break
-        else:
-            return observation, info, False
-        turned, previous = 0.0, base.heading()
-        for _ in range(max_steps):
-            observation, _, terminated, _, info = self._drive(-1.0)
-            if terminated:
-                return observation, info, False
-            heading = base.heading()
-            turned += abs(math.remainder(heading - previous, 2 * math.pi))
-            previous = heading
-            if turned >= math.pi:
-                lane = info.get("lane", {})
-                return observation, info, bool(lane.get("on_road")) and abs(lane.get("distance", 1.0)) < 0.05
-        return observation, info, False
 
     def step(self, action):
         observation, reward, terminated, truncated, info = self.env.step(action)
@@ -289,33 +281,26 @@ class RandomStart(gym.Wrapper):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
-        if not self._needs_reset and self._last is not None:
+        if self._continue and not self._needs_reset and self._last is not None:
             self._needs_reset = True
             return self._last
+        base = base_env(self.env)
         for _ in range(20):
-            observation, info = self.env.reset(seed=seed, options=options)
-            terminated = False
-            lane: dict[str, float] = {}
-            if self._rng.random() < self._other_lane_prob:
-                observation, info, ok = self._to_other_lane()
-                if not ok:
-                    continue
-                lane = info.get("lane", {})
-            for _ in range(int(self._rng.integers(0, self._max_drive_steps + 1))):
-                observation, _, terminated, _, info = self._drive(lane_oracle(lane))
-                lane = info.get("lane", {})
-                if terminated:
-                    break
-            steering = float(self._rng.uniform(-0.6, 0.6))
-            for _ in range(int(self._rng.integers(0, self._max_perturb_steps + 1))):
-                if terminated:
-                    break
-                observation, _, terminated, _, info = self._drive(steering)
-            if not terminated:
+            pose = sample_lane_pose(base._map_interpreter, self._rng, max_offset=self._max_offset, max_angle=self._max_angle)  # noqa: SLF001
+            observation, info = self.env.reset(seed=seed, options={**(options or {}), "pose": pose})
+            reached = base._pose["position"] if base._pose else None  # noqa: SLF001
+            if reached is None or math.hypot(reached["x"] - pose["x"], reached["y"] - pose["y"]) > 0.05:  # noqa: PLR2004
+                message = (
+                    f"Asked the engine to reset the robot to {pose}, it is at {reached}: the engine or "
+                    "gym-duckiematrix does not support reset poses (gym-duckiematrix 0.1.1 and a matching "
+                    "engine needed)."
+                )
+                raise RuntimeError(message)
+            if info.get("lane", {}).get("on_road"):
                 self._needs_reset = True
                 self._last = (observation, info)
                 return observation, info
-        message = "Could not find an on-road start pose after 20 resets."
+        message = "Could not find an on-road start pose in 20 draws."
         raise RuntimeError(message)
 
 
@@ -453,7 +438,7 @@ class ContinuousSteering(gym.ActionWrapper):
 ACTION_MODES = ("discrete", "steering", "wheels")
 
 
-def make_env(  # noqa: PLR0913
+def make_env(  # noqa: C901, PLR0913
     preprocess: PreprocessFn,
     *,
     engine_host: str | None = None,
@@ -467,7 +452,8 @@ def make_env(  # noqa: PLR0913
     out_of_road_penalty: float = -10.0,
     delta_t: float = DELTA_T,
     reward_fn: RewardFn | None = None,
-    action_delay: int = 1,
+    action_delay: int | None = None,
+    mode: str = "gym",
 ) -> gym.Env:
     """Build the wrapped Duckiematrix environment used by the notebooks.
 
@@ -487,18 +473,38 @@ def make_env(  # noqa: PLR0913
         delta_t: simulated seconds per engine step (must match the engine's ``--delta-t``).
         reward_fn: per-step reward from ``info["lane"]`` (:func:`default_reward` by default).
         action_delay: largest delay of the wheel commands, in simulator steps (:class:`ActionDelay`;
-            0 turns it off).
+            0 turns it off). Default: 1 in gym mode, 0 in real time (where the delay is real).
+        mode: ``"gym"`` (the engine waits for the agent; start it with ``--gym``) or ``"realtime"``
+            (the engine runs on the wall clock: :class:`rl_duckiematrix.realtime.RealtimeDuckiematrixEnv`,
+            notebook 06; ``delta_t`` is then the wall-clock tick, and ``render_mode`` and ``shm_path``
+            do not apply).
 
     """
     if actions not in ACTION_MODES:
         message = f"actions must be one of {ACTION_MODES}, got {actions!r}."
         raise ValueError(message)
-    env: gym.Env = DuckiematrixEnv(
-        engine_host=engine_host, render_mode=render_mode, shm_path=shm_path,
-        out_of_road_penalty=out_of_road_penalty, delta_t=delta_t, reward_fn=reward_fn,
-    )
-    if action_delay > 0:
-        env = ActionDelay(env, action_delay)
+    env: gym.Env
+    if mode == "gym":
+        env = DuckiematrixEnv(
+            engine_host=engine_host, render_mode=render_mode, shm_path=shm_path,
+            out_of_road_penalty=out_of_road_penalty, delta_t=delta_t, reward_fn=reward_fn,
+        )
+        delay = 1 if action_delay is None else action_delay
+    elif mode == "realtime":
+        if render_mode is not None or shm_path is not None:
+            message = "render_mode and shm_path are gym-mode options."
+            raise ValueError(message)
+        from rl_duckiematrix.realtime import RealtimeDuckiematrixEnv  # noqa: PLC0415
+
+        env = RealtimeDuckiematrixEnv(
+            engine_host=engine_host, tick=delta_t, reward_fn=reward_fn, out_of_road_penalty=out_of_road_penalty,
+        )
+        delay = 0 if action_delay is None else action_delay
+    else:
+        message = f"mode must be 'gym' or 'realtime', got {mode!r}."
+        raise ValueError(message)
+    if delay > 0:
+        env = ActionDelay(env, delay)
     if random_start:
         env = RandomStart(env)
     if action_repeat > 1:

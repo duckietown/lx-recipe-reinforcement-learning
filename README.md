@@ -10,7 +10,7 @@ a real Duckiebot.
 
 | path | purpose |
 |---|---|
-| `packages/rl_duckiematrix/` | support code the learner does not edit: the gridworld of notebook 01, the Duckiematrix Gymnasium environment and its wrappers (`make_env`), the training loops, ONNX export and the `OnnxPolicy` runner |
+| `packages/rl_duckiematrix/` | support code the learner does not edit: the gridworld of notebook 01, the Duckiematrix Gymnasium environment and its wrappers (`make_env`; `realtime.py`: the same environment on a real-time engine, notebook 06), the training loops, ONNX export and the `OnnxPolicy` runner |
 | `packages/agent/` | the deployment agent (`python3 -m agent`, started by `launchers/default.sh`): camera -> learner's `preprocess` -> `OnnxPolicy` -> wheel commands at the policy's decision rate (5 Hz), through the Duckietown SDK. On a real robot the steering becomes the simulator's speed and turn rate, then PWM through the robot's kinematics calibration (`rl_duckiematrix/kinematics.py`). It runs on the robot (`dts code build -R ROBOT`, `dts code workbench -R ROBOT`), not with `--local`, which would put the Wi-Fi and its variable delay between the camera, the policy and the motors |
 | `assets/duckiematrix/map/loop/` | the training map: the standard loop with a 160x120 camera (`cameras.yaml`), which makes the simulator step faster than the default 640x480 |
 | `Dockerfile` | robot image, `dt-commons` base (no ROS: DTPS only); `packages/` on `PYTHONPATH` |
@@ -31,6 +31,19 @@ it must match `rl_duckiematrix.env.DELTA_T`, which the environment uses to compu
 
 The engine accepts one client at a time: a notebook must `close()` its environment before
 another one connects. `dts code workbench -m` uses the normal real-time mode, as on a real robot.
+
+## Real-time mode
+
+Notebook 06 runs the same environment on the engine in its normal real-time mode (`dts code start_matrix`,
+no `--gym`): `make_env(..., mode="realtime")` builds the usual wrapper stack on
+`rl_duckiematrix.realtime.RealtimeDuckiematrixEnv`, which sends the wheel commands over DTPS like the robot
+agent, steps on a 0.1 s wall-clock tick and reads the newest image and pose; `env.unwrapped.timing` and
+`timing_summary` record how late the agent came back. Random start poses use the engine's real-time
+reset-to-pose (`state/reset_pose`, DTSW-8541); the engine's plain reset and the renderer's R key go back
+to the spawn pose. No action delay is simulated by default in real time (`action_delay=None` means 1 in gym
+mode, 0 in real time). Measured on a laptop VM: the gym-trained SAC policy drives as well in real time
+(steering change 0.04 / 0.10 per decision, outer / inner lane); training in real time works, but each SAC
+update (~0.18 s) is longer than a tick, so once updates start one step in four arrives ~0.18 s late.
 
 The Python environment inside the editor finds the engine through `rl_duckiematrix.engine`
 (`DUCKIEMATRIX_HOST`, then `127.0.0.1`, `host.docker.internal` and the default gateway): the editor
@@ -68,14 +81,14 @@ nothing is compiled there. The agent was built and run this way on a Jetson Nano
 - Rates (native macOS renderer, 160x120 camera): ~18 engine steps/s of wall-clock time, i.e. the
   simulation runs ~1.8x faster than real time; ~7 decisions/s during DQN training (gradient steps and
   the random starts included).
-- The engine only resets the robot to its spawn pose (half a tile before a curve, in the outer lane,
-  where all four curves turn left; the inner lane's curves turn right with a 0.18 m radius instead of
-  0.41 m). After each reset `RandomStart` moves the robot to the inner lane on half of the episodes
-  (`lane_oracle` drives into a straight tile, then full-left steering until the heading has turned
-  180°), lets `lane_oracle` drive a random number of steps (up to 330, about one lap) and then up to
-  10 steps of random constant steering; after a time-limit truncation the next episode continues
-  where the robot is, so that episodes start all around the loop rather than always before the same
-  curve. To be replaced by a reset-to-pose in the gym protocol once the DTSW-7149 PRs are merged.
+- Start poses: each reset puts the robot at a random pose on the road (`RandomStart`, through
+  `env.reset(options={"pose": ...})`, DTSW-8541): a random tile, either lane, a random point along the
+  lane centre, then up to 4 cm sideways and 23° off the lane direction (`sample_lane_pose`). Every
+  episode starts at a new pose, so training sees both lanes (outer lane: all four curves turn left,
+  radius 0.41 m; inner lane: right curves, 0.18 m) and every tile equally. A reset takes ~0.05 s; the
+  previous `RandomStart` drove up to 330 oracle steps plus a U-turn after every reset (the engine could
+  only reset to the spawn pose), which made early training ~4x slower, and after a time-limit truncation
+  it continued where the robot was, so long episodes kept training in one lane.
 - `ActionDelay` applies the wheel commands 0 or 1 simulator steps (0 or 0.1 s) late, drawn per
   episode (`make_env(action_delay=...)`), because the real robot's loop (camera, network, decoding)
   is slower than the simulator's, which has no delay.
@@ -107,5 +120,10 @@ nothing is compiled there. The agent was built and run this way on a Jetson Nano
   centre, smooth up to 0.2 s of delay. In the inner lane it still oscillated (0.55, off the road in 3 of
   8 episodes): after a time-limit truncation `RandomStart` continues where the robot is, so long
   episodes kept training in one lane. Starting every episode at a new pose (DTSW-8541) fixes that.
+- Pose starts + smoothness (the current defaults), SAC (`SACConfig()`, 15k decisions, 49 min): every
+  episode reaches the limit from about 2.4k decisions. Per decision, 2 x 300 decisions per case, delays
+  0 to 0.3 s (training draws 0 or 0.1 s): steering change 0.04-0.07 in the outer lane and 0.07-0.14 in
+  the inner lane, no left/right swaps, never off the road; 0.8-1.2 cm from the lane centre in the outer
+  lane and 0.6-0.9 cm in the inner lane (oracle: 1.9 and 2.5 cm, steering change 0.02).
 - Known SDK issue: `DB21J(...).delta_time` requests `/delta_time/` without its `map/` prefix (404), so
   the time step cannot be read from the engine yet.
